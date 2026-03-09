@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qwen3-asr-local"
+version = "0.1.0"
+description = "Minimal local audio/video-to-text pipeline built on mlx-qwen3-asr"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mlx-qwen3-asr",
+    "silero-vad",
+    "soundfile",
+]
+
+[project.scripts]
+qwen3-asr = "asr_core.main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["asr_core*"]
