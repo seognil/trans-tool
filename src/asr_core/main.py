@@ -10,7 +10,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TypedDict
 
-from asr_core.audio import normalize_to_wav
+from asr_core.audio import normalize_to_wav, probe_media_info
 from asr_core.mlx_runtime import MlxTranscriber
 from asr_core.schema import PipelineResult
 from asr_core.vad import MAX_CHUNK_SECONDS, TARGET_CHUNK_SECONDS, plan_chunks
@@ -149,6 +149,14 @@ def run_pipeline(
     temp_output_path = _resolve_temp_output_path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     _ensure_writable_output(output_path, force=force)
+    media_info = probe_media_info(source_path)
+
+    print(
+        f"input={source_path}, "
+        f"duration={_format_optional_duration(media_info.duration_seconds)}, "
+        f"size={_format_size(media_info.size_bytes)}"
+    )
+    print(f"output={output_path}")
 
     chunk_languages: list[str] = []
     chunk_texts: list[str] = []
@@ -322,3 +330,25 @@ def _format_duration(seconds: float) -> str:
     if minutes:
         return f"{minutes}m{secs:02d}s"
     return f"{secs}s"
+
+
+def _format_optional_duration(seconds: float | None) -> str:
+    if seconds is None:
+        return "unknown"
+    return _format_duration(seconds)
+
+
+def _format_size(size_bytes: int | None) -> str:
+    if size_bytes is None:
+        return "unknown"
+    units = ("B", "KB", "MB", "GB", "TB")
+    value = float(size_bytes)
+    unit_index = 0
+    while value >= 1024 and unit_index < len(units) - 1:
+        value /= 1024
+        unit_index += 1
+    if unit_index == 0:
+        return f"{int(value)}{units[unit_index]}"
+    if value >= 10 or unit_index <= 2:
+        return f"{value:.0f}{units[unit_index]}"
+    return f"{value:.1f}{units[unit_index]}"

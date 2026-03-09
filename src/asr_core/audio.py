@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 SAMPLE_RATE = 16000
+
+
+@dataclass(frozen=True)
+class MediaInfo:
+    duration_seconds: float | None
+    size_bytes: int | None
 
 
 def normalize_to_wav(source: Path, destination: Path) -> None:
@@ -41,9 +49,41 @@ def load_audio_samples(audio_path: Path):
     return wav
 
 
+def probe_media_info(source: Path) -> MediaInfo:
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration,size",
+        "-of",
+        "json",
+        str(source),
+    ]
+    completed = run_command(command)
+    payload = json.loads(completed.stdout or "{}")
+    format_info = payload.get("format", {})
+    return MediaInfo(
+        duration_seconds=_parse_float(format_info.get("duration")),
+        size_bytes=_parse_int(format_info.get("size")),
+    )
+
+
 def run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(command, check=False, capture_output=True, text=True)
     if completed.returncode != 0:
         stderr = completed.stderr.strip()
         raise RuntimeError(f"command failed: {' '.join(command)}\n{stderr}")
     return completed
+
+
+def _parse_float(value: object) -> float | None:
+    if value in (None, ""):
+        return None
+    return float(value)
+
+
+def _parse_int(value: object) -> int | None:
+    if value in (None, ""):
+        return None
+    return int(value)
