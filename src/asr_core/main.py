@@ -8,6 +8,7 @@ import time
 from collections import Counter
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import TypedDict
 
 from asr_core.audio import normalize_to_wav
 from asr_core.mlx_runtime import MlxTranscriber
@@ -15,6 +16,16 @@ from asr_core.schema import PipelineResult
 from asr_core.vad import MAX_CHUNK_SECONDS, TARGET_CHUNK_SECONDS, plan_chunks
 
 DEFAULT_MODEL = "Qwen/Qwen3-ASR-0.6B"
+
+
+class Job(TypedDict):
+    source: str
+    output_dir: str | None
+
+
+class PreparedJobs(TypedDict):
+    jobs: list[Job]
+    skipped: list[tuple[str, str]]
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,11 +59,18 @@ def parse_args() -> argparse.Namespace:
         "--language",
         help="Optional forced language, for example 'zh' or 'Chinese'.",
     )
-    parser.add_argument(
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
         "-y",
         "--force",
         action="store_true",
         help="Overwrite the output text file if it already exists.",
+    )
+    mode_group.add_argument(
+        "-s",
+        "--skip-existing",
+        action="store_true",
+        help="Skip inputs whose output text file already exists.",
     )
     return parser.parse_args()
 
@@ -61,10 +79,23 @@ def main() -> int:
     args = parse_args()
 
     try:
-        jobs = _prepare_jobs(args.inputs, args.output_dir, force=args.force)
+        prepared = _prepare_jobs(
+            args.inputs,
+            args.output_dir,
+            force=args.force,
+            skip_existing=args.skip_existing,
+        )
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+
+    jobs = prepared["jobs"]
+    for source, output_path in prepared["skipped"]:
+        print(f"skip: {source} -> {output_path}")
+
+    if not jobs:
+        print("nothing to do")
+        return 0
 
     exit_code = 0
     total_jobs = len(jobs)
@@ -94,6 +125,7 @@ def main() -> int:
         print(f"text_chars={len(result.text)}")
         print(f"chunks={result.chunk_count}")
         print(f"silence_gaps={result.silence_gap_count}")
+        print(f"elapsed={_format_duration(result.elapsed_seconds)}")
         print(f"output={result.output_path}")
 
     return exit_code
@@ -108,73 +140,83 @@ def run_pipeline(
     language: str | None = None,
     force: bool = False,
 ) -> PipelineResult:
+    pipeline_started = time.perf_counter()
     source_path = Path(source).expanduser().resolve()
     if not source_path.exists():
         raise FileNotFoundError(f"input file not found: {source_path}")
 
     output_path = _resolve_output_path(source_path, output_dir)
+    temp_output_path = _resolve_temp_output_path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     _ensure_writable_output(output_path, force=force)
 
-    with TemporaryDirectory(prefix="qwen-asr-") as temp_dir:
-        work_dir = Path(temp_dir)
-        chunk_dir = work_dir / "chunks"
-        normalized_audio = work_dir / "normalized.wav"
+    chunk_languages: list[str] = []
+    chunk_texts: list[str] = []
 
-        print("[1/4] normalize audio")
-        normalize_to_wav(source_path, normalized_audio)
+    try:
+        with TemporaryDirectory(prefix="qwen-asr-") as temp_dir:
+            work_dir = Path(temp_dir)
+            chunk_dir = work_dir / "chunks"
+            normalized_audio = work_dir / "normalized.wav"
 
-        print(
-            "[2/4] plan chunks with Silero VAD segmentation "
-            f"(target={TARGET_CHUNK_SECONDS}s, max={MAX_CHUNK_SECONDS}s)"
-        )
-        chunks, silence_gaps = plan_chunks(normalized_audio, chunk_dir)
-        print(f"created {len(chunks)} chunks")
-        if silence_gaps:
-            print(f"detected {len(silence_gaps)} silence gaps")
+            print("[1/4] normalize audio")
+            normalize_to_wav(source_path, normalized_audio)
 
-        print("[3/4] transcribe chunks with MLX")
-        runtime = MlxTranscriber(
-            model=model,
-            max_new_tokens=max_new_tokens,
-            language=language,
-        )
-        chunk_languages: list[str] = []
-        chunk_texts: list[str] = []
-        started = time.perf_counter()
-        with output_path.open("w", encoding="utf-8") as handle:
-            for index, chunk in enumerate(chunks, start=1):
-                chunk_started = time.perf_counter()
-                detected_language, text = runtime.transcribe_chunk(chunk)
-                chunk_elapsed = time.perf_counter() - chunk_started
-                if detected_language:
-                    chunk_languages.append(detected_language)
-                cleaned_text = text.strip()
-                if cleaned_text:
-                    if chunk_texts:
-                        handle.write("\n\n")
-                    handle.write(cleaned_text)
-                    handle.flush()
-                    chunk_texts.append(cleaned_text)
+            print(
+                "[2/4] plan chunks with Silero VAD segmentation "
+                f"(target={TARGET_CHUNK_SECONDS}s, max={MAX_CHUNK_SECONDS}s)"
+            )
+            chunks, silence_gaps = plan_chunks(normalized_audio, chunk_dir)
+            print(f"created {len(chunks)} chunks")
+            if silence_gaps:
+                print(f"detected {len(silence_gaps)} silence gaps")
 
-                elapsed_total = time.perf_counter() - started
-                eta_text = _format_eta(
-                    elapsed_total=elapsed_total,
-                    finished_chunks=index,
-                    total_chunks=len(chunks),
-                )
-                status = (
-                    f"  - chunk {index}/{len(chunks)} "
-                    f"[{chunk.start_seconds:.1f}s -> {chunk.end_seconds:.1f}s] "
-                    f"done in {chunk_elapsed:.1f}s, wrote {len(cleaned_text)} chars"
-                )
-                if eta_text:
-                    status = f"{status}, eta ~ {eta_text}"
-                print(status)
+            print("[3/4] transcribe chunks with MLX")
+            runtime = MlxTranscriber(
+                model=model,
+                max_new_tokens=max_new_tokens,
+                language=language,
+            )
+            started = time.perf_counter()
+            with temp_output_path.open("w", encoding="utf-8") as handle:
+                for index, chunk in enumerate(chunks, start=1):
+                    chunk_started = time.perf_counter()
+                    detected_language, text = runtime.transcribe_chunk(chunk)
+                    chunk_elapsed = time.perf_counter() - chunk_started
+                    if detected_language:
+                        chunk_languages.append(detected_language)
+                    cleaned_text = text.strip()
+                    if cleaned_text:
+                        if chunk_texts:
+                            handle.write("\n\n")
+                        handle.write(cleaned_text)
+                        handle.flush()
+                        chunk_texts.append(cleaned_text)
+
+                    elapsed_total = time.perf_counter() - started
+                    eta_text = _format_eta(
+                        elapsed_total=elapsed_total,
+                        finished_chunks=index,
+                        total_chunks=len(chunks),
+                    )
+                    status = (
+                        f"  - chunk {index}/{len(chunks)} "
+                        f"[{chunk.start_seconds:.1f}s -> {chunk.end_seconds:.1f}s] "
+                        f"done in {chunk_elapsed:.1f}s, wrote {len(cleaned_text)} chars"
+                    )
+                    if eta_text:
+                        status = f"{status}, eta ~ {eta_text}"
+                    print(status)
+    except Exception:
+        if temp_output_path.exists():
+            temp_output_path.unlink()
+        raise
 
     final_text = _build_output_text(chunk_texts)
-    if final_text:
-        output_path.write_text(final_text + "\n", encoding="utf-8")
+    temp_output_path.write_text(
+        final_text + "\n" if final_text else "", encoding="utf-8"
+    )
+    temp_output_path.replace(output_path)
     print(f"[4/4] write transcript -> {output_path}")
     print(f"wrote {output_path}")
     return PipelineResult(
@@ -185,13 +227,15 @@ def run_pipeline(
         text=final_text,
         chunk_count=len(chunks),
         silence_gap_count=len(silence_gaps),
+        elapsed_seconds=time.perf_counter() - pipeline_started,
     )
 
 
 def _prepare_jobs(
-    inputs: list[str], output_dir: str | None, *, force: bool
-) -> list[dict[str, str | None]]:
-    jobs: list[dict[str, str | None]] = []
+    inputs: list[str], output_dir: str | None, *, force: bool, skip_existing: bool
+) -> PreparedJobs:
+    jobs: list[Job] = []
+    skipped: list[tuple[str, str]] = []
     seen_outputs: dict[Path, Path] = {}
     errors: list[str] = []
 
@@ -202,6 +246,9 @@ def _prepare_jobs(
             continue
 
         output_path = _resolve_output_path(source_path, output_dir)
+        if output_path.exists() and skip_existing:
+            skipped.append((str(source_path), str(output_path)))
+            continue
         if output_path.exists() and not force:
             errors.append(f"exists: {source_path} -> {output_path}")
 
@@ -216,7 +263,7 @@ def _prepare_jobs(
     if errors:
         raise ValueError("batch preflight failed:\n- " + "\n- ".join(errors))
 
-    return jobs
+    return {"jobs": jobs, "skipped": skipped}
 
 
 def _resolve_output_path(source_path: Path, output_dir: str | None) -> Path:
@@ -224,6 +271,10 @@ def _resolve_output_path(source_path: Path, output_dir: str | None) -> Path:
     if output_dir:
         return Path(output_dir).expanduser().resolve() / filename
     return source_path.parent / filename
+
+
+def _resolve_temp_output_path(output_path: Path) -> Path:
+    return output_path.with_name(f"{output_path.name}.tmp")
 
 
 def _ensure_writable_output(output_path: Path, *, force: bool) -> None:
@@ -260,3 +311,14 @@ def _format_eta(
     if minutes:
         return f"{minutes}m{seconds:02d}s"
     return f"{seconds}s"
+
+
+def _format_duration(seconds: float) -> str:
+    remaining_seconds = int(round(max(0.0, seconds)))
+    minutes, secs = divmod(remaining_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"

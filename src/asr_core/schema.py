@@ -31,3 +31,4 @@ class PipelineResult:
     text: str
     chunk_count: int
     silence_gap_count: int
+    elapsed_seconds: float
