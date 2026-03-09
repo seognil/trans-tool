@@ -45,6 +45,12 @@ TL;DR:
 uv run qwen3-asr samples/asr_zh.wav
 ```
 
+Multiple inputs are processed one by one using the same single-file pipeline:
+
+```bash
+uv run qwen3-asr samples/asr_zh.wav samples/sample-20min.m4a
+```
+
 Module entrypoint is also available if you prefer:
 
 ```bash
@@ -58,13 +64,16 @@ uv tool install .
 qwen3-asr samples/asr_zh.wav
 ```
 
-With the default settings, that command writes `samples/asr_zh.txt` next to the input file.
+With the default settings, that command writes `samples/asr_zh.wav.txt` next to the input file.
 
 More examples:
 
 ```bash
 # write the transcript into a custom output directory
 uv run qwen3-asr samples/asr_zh.wav --output-dir dist/my-run
+
+# process multiple inputs in order
+uv run qwen3-asr samples/asr_zh.wav samples/sample-20min.m4a
 
 # force the language
 uv run qwen3-asr samples/asr_zh.wav --language zh
@@ -81,7 +90,7 @@ uv run qwen3-asr samples/asr_zh.wav -y
 
 Parameters:
 
-- `input` - input audio or video file path
+- `inputs` - one or more input audio or video file paths; multiple inputs run sequentially in the given order
 - `--output-dir` - optional output directory; default is the input file directory
 - `--model` - model name or local path, default `Qwen/Qwen3-ASR-0.6B`
 - `--language` - optional forced language, otherwise auto-detect
@@ -90,9 +99,10 @@ Parameters:
 
 Output behavior:
 
-- default output path: the input file with a `.txt` suffix in the same directory
-- example: `samples/asr_zh.wav` -> `samples/asr_zh.txt`
-- with `--output-dir dist/my-run`: `samples/asr_zh.wav` -> `dist/my-run/asr_zh.txt`
+- default output path: the input file name with an extra `.txt` suffix in the same directory
+- example: `samples/asr_zh.wav` -> `samples/asr_zh.wav.txt`
+- with `--output-dir dist/my-run`: `samples/asr_zh.wav` -> `dist/my-run/asr_zh.wav.txt`
+- for multiple inputs, the tool checks all target output paths before starting any transcription and lists all preflight problems in a single error
 - the output text keeps chunk boundaries as blank-line-separated paragraphs
 
 ## References

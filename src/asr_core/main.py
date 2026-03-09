@@ -24,7 +24,11 @@ def parse_args() -> argparse.Namespace:
             "segmentation, and MLX Qwen3-ASR transcription."
         )
     )
-    parser.add_argument("input", help="Input audio or video file path.")
+    parser.add_argument(
+        "inputs",
+        nargs="+",
+        help="One or more input audio or video file paths.",
+    )
     parser.add_argument(
         "--output-dir",
         help="Optional output directory. Defaults to the input file directory.",
@@ -55,24 +59,44 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+
     try:
-        result = run_pipeline(
-            source=args.input,
-            output_dir=args.output_dir,
-            model=args.model,
-            max_new_tokens=args.max_new_tokens,
-            language=args.language,
-            force=args.force,
-        )
-    except FileExistsError as exc:
+        jobs = _prepare_jobs(args.inputs, args.output_dir, force=args.force)
+    except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    print(f"language={result.language}")
-    print(f"text_chars={len(result.text)}")
-    print(f"chunks={result.chunk_count}")
-    print(f"silence_gaps={result.silence_gap_count}")
-    print(f"output={result.output_path}")
-    return 0
+
+    exit_code = 0
+    total_jobs = len(jobs)
+    for index, job in enumerate(jobs, start=1):
+        if total_jobs > 1:
+            print(f"[{index}/{total_jobs}] input={job['source']}")
+
+        source, output_dir = job["source"], job["output_dir"]
+        try:
+            result = run_pipeline(
+                source=source,
+                output_dir=output_dir,
+                model=args.model,
+                max_new_tokens=args.max_new_tokens,
+                language=args.language,
+                force=args.force,
+            )
+        except FileExistsError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        except Exception as exc:
+            print(f"failed for {source}: {exc}", file=sys.stderr)
+            exit_code = 1
+            break
+
+        print(f"language={result.language}")
+        print(f"text_chars={len(result.text)}")
+        print(f"chunks={result.chunk_count}")
+        print(f"silence_gaps={result.silence_gap_count}")
+        print(f"output={result.output_path}")
+
+    return exit_code
 
 
 def run_pipeline(
@@ -164,11 +188,42 @@ def run_pipeline(
     )
 
 
+def _prepare_jobs(
+    inputs: list[str], output_dir: str | None, *, force: bool
+) -> list[dict[str, str | None]]:
+    jobs: list[dict[str, str | None]] = []
+    seen_outputs: dict[Path, Path] = {}
+    errors: list[str] = []
+
+    for source in inputs:
+        source_path = Path(source).expanduser().resolve()
+        if not source_path.exists():
+            errors.append(f"missing: {source_path}")
+            continue
+
+        output_path = _resolve_output_path(source_path, output_dir)
+        if output_path.exists() and not force:
+            errors.append(f"exists: {source_path} -> {output_path}")
+
+        first_source = seen_outputs.get(output_path)
+        if first_source is not None:
+            errors.append(f"conflict: {first_source}, {source_path} -> {output_path}")
+            continue
+
+        seen_outputs[output_path] = source_path
+        jobs.append({"source": str(source_path), "output_dir": output_dir})
+
+    if errors:
+        raise ValueError("batch preflight failed:\n- " + "\n- ".join(errors))
+
+    return jobs
+
+
 def _resolve_output_path(source_path: Path, output_dir: str | None) -> Path:
-    filename = f"{source_path.stem}.txt"
+    filename = f"{source_path.name}.txt"
     if output_dir:
         return Path(output_dir).expanduser().resolve() / filename
-    return source_path.with_suffix(".txt")
+    return source_path.parent / filename
 
 
 def _ensure_writable_output(output_path: Path, *, force: bool) -> None:
