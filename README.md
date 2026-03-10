@@ -1,20 +1,20 @@
-# Local Qwen3-ASR with VAD and MLX
+# Local Qwen3-ASR with VAD and MLX Audio
 
 ## What It Does
 
 This project is a minimal local audio/video-to-text pipeline for Apple Silicon Macs.
 
-Its default workflow is:
+Its fixed workflow is:
 
 1. `ffmpeg` converts the input media to `mono 16k wav`
-2. `silero-vad` finds speech regions and guides long-audio chunking
-3. `mlx-qwen3-asr` transcribes each chunk locally with Qwen3-ASR
+2. `silero-vad` finds speech regions and guides long-audio chunking so the pipeline spends less time and memory than letting `mlx-audio` handle long chunks directly
+3. `mlx-audio` transcribes each chunk locally with `mlx-community/Qwen3-ASR-0.6B-8bit` and auto language detection on
 4. the pipeline writes a plain-text transcript
 
 Dependencies are intentionally kept small:
 
 - system tool: `ffmpeg` (includes `ffprobe`)
-- Python packages managed by this project: `mlx-qwen3-asr`, `silero-vad`, `soundfile`
+- Python packages managed by this project: `mlx-audio`, `silero-vad`, `soundfile`
 
 ## Installation
 
@@ -28,7 +28,7 @@ Project environment and Python dependencies:
 
 ```bash
 uv venv --python 3.10
-uv sync
+uv sync --prerelease allow
 ```
 
 Optional: download the official Qwen3-ASR sample audio for a quick local test:
@@ -60,7 +60,7 @@ uv run python -m asr_core samples/asr_zh.wav
 Install as a user-level tool:
 
 ```bash
-uv tool install .
+uv tool install . --prerelease allow
 qwen3-asr samples/asr_zh.wav
 ```
 
@@ -75,15 +75,6 @@ uv run qwen3-asr samples/asr_zh.wav --output-dir dist/my-run
 # process multiple inputs in order
 uv run qwen3-asr samples/asr_zh.wav samples/sample-20min.m4a
 
-# force the language
-uv run qwen3-asr samples/asr_zh.wav --language zh
-
-# override the model
-uv run qwen3-asr samples/asr_zh.wav --model Qwen/Qwen3-ASR-0.6B
-
-# override the upstream token limit
-uv run qwen3-asr samples/asr_zh.wav --max-new-tokens 1024
-
 # overwrite an existing output file
 uv run qwen3-asr samples/asr_zh.wav -y
 
@@ -95,9 +86,6 @@ Parameters:
 
 - `inputs` - one or more input audio or video file paths; multiple inputs run sequentially in the given order
 - `--output-dir` - optional output directory; default is the input file directory
-- `--model` - model name or local path, default `Qwen/Qwen3-ASR-0.6B`
-- `--language` - optional forced language, otherwise auto-detect
-- `--max-new-tokens` - optional override, otherwise `mlx_qwen3_asr` uses its default `1024`
 - `-y`, `--force` - overwrite the output text file if it already exists
 - `-s`, `--skip-existing` - skip inputs whose final output text file already exists
 
@@ -115,8 +103,8 @@ Output behavior:
 
 The current design is informed mainly by these upstream projects:
 
-- [`moona3k/mlx-qwen3-asr`](https://github.com/moona3k/mlx-qwen3-asr)
-  - local MLX-based Qwen3-ASR runtime reference
+- [`Blaizzy/mlx-audio`](https://github.com/Blaizzy/mlx-audio)
+  - local MLX audio runtime reference used by the current ASR path
 - [`QwenLM/Qwen3-ASR`](https://github.com/QwenLM/Qwen3-ASR)
   - original open-source model, API shape, and evaluation defaults
 - [`QwenLM/Qwen3-ASR-Toolkit`](https://github.com/QwenLM/Qwen3-ASR-Toolkit)

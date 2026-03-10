@@ -19,16 +19,16 @@ class AudioChunk:
     path: Path
     start_seconds: float
     end_seconds: float
-    boundary_mode: str
 
 
 @dataclass(frozen=True)
 class PipelineResult:
-    source: str
     output_path: str
-    model: str
-    language: str
     text: str
     chunk_count: int
     silence_gap_count: int
+    audio_duration_seconds: float | None
+    normalize_elapsed_seconds: float
+    vad_elapsed_seconds: float
+    asr_elapsed_seconds: float
     elapsed_seconds: float

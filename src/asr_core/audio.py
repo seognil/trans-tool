@@ -7,6 +7,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+import soundfile as sf
+
 SAMPLE_RATE = 16000
 
 
@@ -34,11 +36,6 @@ def normalize_to_wav(source: Path, destination: Path) -> None:
 
 
 def load_audio_samples(audio_path: Path):
-    try:
-        import soundfile as sf
-    except Exception as exc:
-        raise RuntimeError(f"audio loading dependencies unavailable: {exc}") from exc
-
     wav, sample_rate = sf.read(str(audio_path), dtype="float32")
     if sample_rate != SAMPLE_RATE:
         raise RuntimeError(
@@ -50,22 +47,31 @@ def load_audio_samples(audio_path: Path):
 
 
 def probe_media_info(source: Path) -> MediaInfo:
-    command = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-show_entries",
-        "format=duration,size",
-        "-of",
-        "json",
-        str(source),
-    ]
-    completed = run_command(command)
+    completed = run_command(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration,size",
+            "-of",
+            "json",
+            str(source),
+        ]
+    )
     payload = json.loads(completed.stdout or "{}")
     format_info = payload.get("format", {})
     return MediaInfo(
-        duration_seconds=_parse_float(format_info.get("duration")),
-        size_bytes=_parse_int(format_info.get("size")),
+        duration_seconds=(
+            float(format_info["duration"])
+            if format_info.get("duration") not in (None, "")
+            else None
+        ),
+        size_bytes=(
+            int(format_info["size"])
+            if format_info.get("size") not in (None, "")
+            else None
+        ),
     )
 
 
@@ -75,15 +81,3 @@ def run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
         stderr = completed.stderr.strip()
         raise RuntimeError(f"command failed: {' '.join(command)}\n{stderr}")
     return completed
-
-
-def _parse_float(value: object) -> float | None:
-    if value in (None, ""):
-        return None
-    return float(value)
-
-
-def _parse_int(value: object) -> int | None:
-    if value in (None, ""):
-        return None
-    return int(value)

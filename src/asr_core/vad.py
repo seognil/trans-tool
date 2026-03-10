@@ -12,8 +12,8 @@ from asr_core.audio import (
 )
 from asr_core.schema import AudioChunk, SilenceGap
 
-TARGET_CHUNK_SECONDS = 120
-MAX_CHUNK_SECONDS = 180
+TARGET_CHUNK_SECONDS = 60
+MAX_CHUNK_SECONDS = 120
 _SILERO_MODEL = None
 
 
@@ -23,10 +23,7 @@ def get_silero_speech_timestamps(
     min_speech_duration_ms: int = 1500,
     min_silence_duration_ms: int = 500,
 ) -> tuple[list[dict[str, int]], list[SilenceGap], int]:
-    try:
-        from silero_vad import get_speech_timestamps, load_silero_vad
-    except Exception as exc:
-        raise RuntimeError(f"silero dependencies unavailable: {exc}") from exc
+    from silero_vad import get_speech_timestamps, load_silero_vad
 
     audio_samples = load_audio_samples(audio_path)
     model = _load_silero_model(load_silero_vad)
@@ -45,6 +42,9 @@ def get_silero_speech_timestamps(
 def plan_chunks(
     audio_path: Path,
     chunk_dir: Path,
+    *,
+    target_chunk_seconds: int = TARGET_CHUNK_SECONDS,
+    max_chunk_seconds: int = MAX_CHUNK_SECONDS,
 ) -> tuple[list[AudioChunk], list[SilenceGap]]:
     chunk_dir.mkdir(parents=True, exist_ok=True)
     speech_timestamps, silence_gaps, total_samples = get_silero_speech_timestamps(
@@ -54,8 +54,8 @@ def plan_chunks(
         speech_timestamps,
         silence_gaps=silence_gaps,
         total_samples=total_samples,
-        target_chunk_seconds=TARGET_CHUNK_SECONDS,
-        max_chunk_seconds=MAX_CHUNK_SECONDS,
+        target_chunk_seconds=target_chunk_seconds,
+        max_chunk_seconds=max_chunk_seconds,
     )
 
     chunks: list[AudioChunk] = []
@@ -66,14 +66,12 @@ def plan_chunks(
         end_seconds = end_sample / SAMPLE_RATE
         chunk_path = chunk_dir / f"chunk-{index:04d}.wav"
         _export_chunk(audio_path, chunk_path, start_seconds, end_seconds)
-        boundary_mode = "final" if index == len(split_points) - 2 else "vad_split"
         chunks.append(
             AudioChunk(
                 index=index,
                 path=chunk_path,
                 start_seconds=start_seconds,
                 end_seconds=end_seconds,
-                boundary_mode=boundary_mode,
             )
         )
     return chunks, silence_gaps
@@ -130,10 +128,26 @@ def _speech_timestamps_to_gaps(
         start_sample = int(segment["start"])
         end_sample = int(segment["end"])
         if start_sample > cursor:
-            gaps.append(_samples_to_gap(cursor, start_sample))
+            start_seconds = cursor / SAMPLE_RATE
+            end_seconds = start_sample / SAMPLE_RATE
+            gaps.append(
+                SilenceGap(
+                    start_seconds=start_seconds,
+                    end_seconds=end_seconds,
+                    duration_seconds=max(0.0, end_seconds - start_seconds),
+                )
+            )
         cursor = max(cursor, end_sample)
     if cursor < total_samples:
-        gaps.append(_samples_to_gap(cursor, total_samples))
+        start_seconds = cursor / SAMPLE_RATE
+        end_seconds = total_samples / SAMPLE_RATE
+        gaps.append(
+            SilenceGap(
+                start_seconds=start_seconds,
+                end_seconds=end_seconds,
+                duration_seconds=max(0.0, end_seconds - start_seconds),
+            )
+        )
     return gaps
 
 
@@ -164,40 +178,17 @@ def _select_boundary(
     total_samples: int,
     start_candidates: list[dict[str, float]],
 ) -> int:
-    valid_starts = _valid_candidates(
-        start_candidates,
-        previous_point,
-        total_samples,
-        min_offset_samples=int(1.0 * SAMPLE_RATE),
-    )
-    return _nearest_candidate(valid_starts, target_time, fallback=target_time)
-
-
-def _valid_candidates(
-    candidates: list[dict[str, float]],
-    previous_point: int,
-    total_samples: int,
-    *,
-    min_offset_samples: int,
-) -> list[dict[str, float]]:
-    return [
+    min_offset_samples = int(1.0 * SAMPLE_RATE)
+    valid_starts = [
         candidate
-        for candidate in candidates
+        for candidate in start_candidates
         if previous_point + min_offset_samples
         <= int(candidate["point"])
         < total_samples
     ]
-
-
-def _nearest_candidate(
-    candidates: list[dict[str, float]],
-    target_time: int,
-    *,
-    fallback: int,
-) -> int:
-    if not candidates:
-        return fallback
-    best = min(candidates, key=lambda item: abs(int(item["point"]) - target_time))
+    if not valid_starts:
+        return target_time
+    best = min(valid_starts, key=lambda item: abs(int(item["point"]) - target_time))
     return int(best["point"])
 
 
@@ -206,16 +197,6 @@ def _load_silero_model(load_silero_vad):
     if _SILERO_MODEL is None:
         _SILERO_MODEL = load_silero_vad()
     return _SILERO_MODEL
-
-
-def _samples_to_gap(start_sample: int, end_sample: int) -> SilenceGap:
-    start_seconds = start_sample / SAMPLE_RATE
-    end_seconds = end_sample / SAMPLE_RATE
-    return SilenceGap(
-        start_seconds=start_seconds,
-        end_seconds=end_seconds,
-        duration_seconds=max(0.0, end_seconds - start_seconds),
-    )
 
 
 def _export_chunk(
